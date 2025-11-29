@@ -53,19 +53,49 @@ def load_backbone_from_checkpoint(
         )
     
     print(f"Loading pretrained backbone from {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     
-    # Extract model state dict (handle different checkpoint formats)
-    if "model_state_dict" in checkpoint:
-        state_dict = checkpoint["model_state_dict"]
-    elif "ema_model_state_dict" in checkpoint:
-        # Use EMA model if available
-        state_dict = checkpoint["ema_model_state_dict"]
-        # Remove ema_model prefix if present
-        state_dict = {k.replace("ema_model.", ""): v for k, v in state_dict.items()}
+    # Check checkpoint format and load accordingly
+    ckpt_type = checkpoint_path.split(".")[-1].lower()
+    if ckpt_type == "safetensors":
+        try:
+            from safetensors.torch import load_file
+        except ImportError:
+            raise ImportError(
+                "safetensors library is required to load .safetensors checkpoints. "
+                "Install it with: pip install safetensors"
+            )
+        # safetensors.load_file returns a dict directly (state dict)
+        checkpoint = load_file(checkpoint_path, device=device)
+        # safetensors files typically contain the state dict directly
+        # But handle wrapped formats if present
+        if "model_state_dict" in checkpoint:
+            state_dict = checkpoint["model_state_dict"]
+        elif "ema_model_state_dict" in checkpoint:
+            state_dict = checkpoint["ema_model_state_dict"]
+            # Remove ema_model prefix if present
+            state_dict = {k.replace("ema_model.", ""): v for k, v in state_dict.items()}
+        else:
+            # Direct state dict (most common for safetensors)
+            state_dict = checkpoint
+    elif ckpt_type == "pt":
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+        
+        # Extract model state dict (handle different checkpoint formats)
+        if "model_state_dict" in checkpoint:
+            state_dict = checkpoint["model_state_dict"]
+        elif "ema_model_state_dict" in checkpoint:
+            # Use EMA model if available
+            state_dict = checkpoint["ema_model_state_dict"]
+            # Remove ema_model prefix if present
+            state_dict = {k.replace("ema_model.", ""): v for k, v in state_dict.items()}
+        else:
+            # Assume checkpoint is the state dict itself
+            state_dict = checkpoint
     else:
-        # Assume checkpoint is the state dict itself
-        state_dict = checkpoint
+        raise ValueError(
+            f"Unsupported checkpoint format: {ckpt_type}. "
+            f"Supported formats: .pt, .safetensors"
+        )
     
     # Remove wrapped model prefix if present (e.g., "transformer.")
     # DTM expects the backbone without CFM wrapper
@@ -133,6 +163,9 @@ def main(model_cfg):
         ode_solver_method=dtm_config.ode_solver_method,
         mel_spec_kwargs=model_cfg.model.mel_spec,
         vocab_char_map=vocab_char_map,
+        audio_drop_prob=dtm_config.get('audio_drop_prob', 0.3),
+        cond_drop_prob=dtm_config.get('cond_drop_prob', 0.2),
+        frac_lengths_mask=tuple(dtm_config.get('frac_lengths_mask', [0.7, 1.0])),
     )
     
     # Verify backbone is frozen

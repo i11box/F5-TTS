@@ -28,7 +28,7 @@ from pydub import AudioSegment, silence
 from transformers import pipeline
 from vocos import Vocos
 
-from f5_tts.model import CFM
+from f5_tts.model import CFM, DiT, DTM, DTMHead
 from f5_tts.model.utils import convert_char_to_pinyin, get_tokenizer
 
 
@@ -274,6 +274,86 @@ def load_model(
     return model
 
 
+# load DTM model for fast inference
+
+
+def load_dtm_model(
+    backbone_cls,
+    backbone_cfg,
+    dtm_ckpt_path,
+    global_timesteps=8,
+    ode_solver_steps=1,
+    ode_solver_method="euler",
+    mel_spec_type=mel_spec_type,
+    vocab_file="",
+    use_ema=True,
+    device=device,
+):
+    """
+    Load DTM model for fast inference (4-8 steps vs 32 steps).
+    
+    Args:
+        backbone_cls: Backbone model class (e.g., DiT)
+        backbone_cfg: Backbone model configuration
+        dtm_ckpt_path: Path to DTM checkpoint
+        global_timesteps: Number of inference steps (4-8 recommended)
+        ode_solver_steps: ODE solver substeps (1 for Euler)
+        ode_solver_method: ODE solver method (euler | midpoint)
+        mel_spec_type: Mel spectrogram type (vocos | bigvgan)
+        vocab_file: Path to vocabulary file
+        use_ema: Whether to use EMA weights
+        device: Device to load model on
+    
+    Returns:
+        DTM model ready for inference
+    """
+    if vocab_file == "":
+        vocab_file = str(files("f5_tts").joinpath("infer/examples/vocab.txt"))
+    tokenizer = "custom"
+
+    print("\nvocab : ", vocab_file)
+    print("token : ", tokenizer)
+    print("model : ", dtm_ckpt_path)
+    print(f"steps : {global_timesteps} (vs 32 for original)\n")
+
+    vocab_char_map, vocab_size = get_tokenizer(vocab_file, tokenizer)
+    
+    # Create backbone (will be frozen in DTM)
+    backbone = backbone_cls(**backbone_cfg, text_num_embeds=vocab_size, mel_dim=n_mel_channels)
+    
+    # Create DTM head
+    head = DTMHead(
+        backbone_dim=backbone_cfg.get("dim", 1024),
+        mel_dim=n_mel_channels,
+        hidden_dim=512,
+        num_layers=6,
+        ff_mult=4,
+    )
+    
+    # Create DTM model
+    dtm_model = DTM(
+        backbone=backbone,
+        head=head,
+        global_timesteps=global_timesteps,
+        ode_solver_steps=ode_solver_steps,
+        ode_solver_method=ode_solver_method,
+        mel_spec_kwargs=dict(
+            n_fft=n_fft,
+            hop_length=hop_length,
+            win_length=win_length,
+            n_mel_channels=n_mel_channels,
+            target_sample_rate=target_sample_rate,
+            mel_spec_type=mel_spec_type,
+        ),
+        vocab_char_map=vocab_char_map,
+    ).to(device)
+
+    dtype = torch.float32 if mel_spec_type == "bigvgan" else None
+    dtm_model = load_checkpoint(dtm_model, dtm_ckpt_path, device, dtype=dtype, use_ema=use_ema)
+
+    return dtm_model
+
+
 def remove_silence_edges(audio, silence_threshold=-42):
     # Remove silence from the start
     non_silent_start_idx = silence.detect_leading_silence(audio, silence_threshold=silence_threshold)
@@ -487,14 +567,26 @@ def infer_batch_process(
 
         # inference
         with torch.inference_mode():
-            generated, _ = model_obj.sample(
-                cond=audio,
-                text=final_text_list,
-                duration=duration,
-                steps=nfe_step,
-                cfg_strength=cfg_strength,
-                sway_sampling_coef=sway_sampling_coef,
-            )
+            # Check if model is DTM or CFM
+            if isinstance(model_obj, DTM):
+                # DTM inference (fast, 4-8 steps)
+                generated, _ = model_obj.sample(
+                    cond=audio,
+                    text=final_text_list,
+                    duration=duration,
+                    steps=nfe_step,  # For DTM, this will be 4-8
+                    cfg_strength=cfg_strength,
+                )
+            else:
+                # CFM inference (standard, 32 steps)
+                generated, _ = model_obj.sample(
+                    cond=audio,
+                    text=final_text_list,
+                    duration=duration,
+                    steps=nfe_step,
+                    cfg_strength=cfg_strength,
+                    sway_sampling_coef=sway_sampling_coef,
+                )
             del _
 
             generated = generated.to(torch.float32)  # generated mel spectrogram

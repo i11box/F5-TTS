@@ -9,6 +9,7 @@ Training follows Algorithm 3 and inference follows Algorithm 4 from the guidelin
 
 from __future__ import annotations
 
+from random import random
 from typing import Callable
 
 import torch
@@ -25,6 +26,7 @@ from f5_tts.model.utils import (
     lens_to_mask,
     list_str_to_idx,
     list_str_to_tensor,
+    mask_from_frac_lengths,
 )
 
 
@@ -68,6 +70,9 @@ class DTM(nn.Module):
         mel_spec_module: nn.Module | None = None,
         mel_spec_kwargs: dict = dict(),
         vocab_char_map: dict[str:int] | None = None,
+        audio_drop_prob: float = 0.3,
+        cond_drop_prob: float = 0.2,
+        frac_lengths_mask: tuple[float, float] = (0.7, 1.0),
     ):
         super().__init__()
         
@@ -91,6 +96,13 @@ class DTM(nn.Module):
         self.ode_solver_steps = ode_solver_steps
         self.ode_solver_method = ode_solver_method
         
+        # Classifier-free guidance parameters
+        self.audio_drop_prob = audio_drop_prob
+        self.cond_drop_prob = cond_drop_prob
+        
+        # Conditional training parameters
+        self.frac_lengths_mask = frac_lengths_mask
+        
         # Mel spec
         self.mel_spec = default(mel_spec_module, MelSpec(**mel_spec_kwargs))
         self.num_channels = self.mel_spec.n_mel_channels
@@ -109,9 +121,15 @@ class DTM(nn.Module):
         text: torch.Tensor,  # [batch, text_len]
         time: torch.Tensor,  # [batch] or scalar
         mask: torch.Tensor | None = None,  # [batch, seq_len]
+        drop_audio_cond: bool = False,
+        drop_text: bool = False,
     ) -> torch.Tensor:
         """
         Extract features from frozen backbone (before final projection).
+        
+        Args:
+            drop_audio_cond: Whether to drop audio conditioning (for CFG)
+            drop_text: Whether to drop text conditioning (for CFG)
         
         Returns:
             h_t: Backbone features [batch, seq_len, backbone_dim]
@@ -126,8 +144,8 @@ class DTM(nn.Module):
         # Get input embeddings (x, cond, text)
         x_embedded = self.backbone.get_input_embed(
             x, cond, text,
-            drop_audio_cond=False,
-            drop_text=False,
+            drop_audio_cond=drop_audio_cond,
+            drop_text=drop_text,
             cache=False,
             audio_mask=mask,
         )
@@ -189,6 +207,13 @@ class DTM(nn.Module):
         
         mask = lens_to_mask(lens, length=seq_len)
         
+        # Get a random span to mask out for training conditionally (like CFM)
+        frac_lengths = torch.zeros((batch_size,), device=device).float().uniform_(*self.frac_lengths_mask)
+        rand_span_mask = mask_from_frac_lengths(lens, frac_lengths)
+        
+        if exists(mask):
+            rand_span_mask &= mask
+        
         # X_T is the real mel spectrogram
         X_T = inp
         
@@ -204,10 +229,18 @@ class DTM(nn.Module):
         t_ratio = t.float().unsqueeze(-1).unsqueeze(-1) / self.T  # [batch, 1, 1]
         X_t = (1 - t_ratio) * X_0 + t_ratio * X_T
         
-        # Extract frozen backbone features h_t
-        # For conditioning, we use zero (unconditional)
-        cond = torch.zeros_like(X_T)
+        # Only predict what is within the random mask span for infilling (like CFM)
+        cond = torch.where(rand_span_mask[..., None], torch.zeros_like(X_T), X_T)
         
+        # Classifier-free guidance training with drop rate (like CFM)
+        drop_audio_cond = random() < self.audio_drop_prob  # p_drop in voicebox paper
+        if random() < self.cond_drop_prob:  # p_uncond in voicebox paper
+            drop_audio_cond = True
+            drop_text = True
+        else:
+            drop_text = False
+        
+        # Extract frozen backbone features h_t
         with torch.no_grad():
             h_t = self.extract_backbone_features(
                 x=X_t,
@@ -215,6 +248,8 @@ class DTM(nn.Module):
                 text=text,
                 time=t_continuous,
                 mask=mask,
+                drop_audio_cond=drop_audio_cond,
+                drop_text=drop_text,
             )
         
         # Compute target displacement Y = X_T - X_0
@@ -236,16 +271,12 @@ class DTM(nn.Module):
         # Compute target velocity: Y - Y_noise
         v_target = Y - Y_noise
         
-        # Compute MSE loss with mask
+        # Compute MSE loss with mask (like CFM, only on masked region)
         loss = F.mse_loss(v_pred, v_target, reduction='none')  # [batch, seq_len, mel_dim]
         
-        # Apply mask to ignore padded regions
-        if exists(mask):
-            mask_expanded = mask.unsqueeze(-1)  # [batch, seq_len, 1]
-            loss = loss * mask_expanded
-            loss = loss.sum() / (mask_expanded.sum() * self.num_channels)
-        else:
-            loss = loss.mean()
+        # Apply rand_span_mask to only compute loss on the region to be predicted
+        loss = loss[rand_span_mask]
+        loss = loss.mean()
         
         return loss, cond, v_pred
     
@@ -258,6 +289,7 @@ class DTM(nn.Module):
         *,
         lens: torch.Tensor | None = None,  # [batch]
         steps: int | None = None,  # override global_timesteps
+        cfg_strength: float = 1.0,  # classifier-free guidance strength
         seed: int | None = None,
         max_duration: int = 4096,
         vocoder: Callable[[torch.Tensor], torch.Tensor] | None = None,
@@ -344,34 +376,76 @@ class DTM(nn.Module):
             t_continuous = torch.full((batch_size,), t / T, device=device, dtype=cond.dtype)
             
             # Extract backbone features h_t
-            h_t = self.extract_backbone_features(
-                x=X,
-                cond=step_cond,
-                text=text,
-                time=t_continuous,
-                mask=mask,
-            )
-            
-            # Solve ODE for Y using the head
-            # dy/ds = head(h_t, y_s, s)
-            # Initial condition: Y_0 ~ N(0, I)
-            Y_0 = torch.randn_like(X)
-            
-            # Define ODE dynamics
-            def ode_fn(s, y):
-                # s is scalar time, y is [batch, seq_len, mel_dim]
-                s_batch = torch.full((batch_size,), s.item(), device=device, dtype=cond.dtype)
-                return self.head(h_t, y, s_batch)
-            
-            # Solve ODE from s=0 to s=1
-            s_span = torch.linspace(0, 1, self.ode_solver_steps + 1, device=device, dtype=cond.dtype)
-            Y_trajectory = odeint(
-                ode_fn,
-                Y_0,
-                s_span,
-                method=self.ode_solver_method,
-            )
-            Y_final = Y_trajectory[-1]  # [batch, seq_len, mel_dim]
+            if cfg_strength < 1e-5:
+                # No CFG, single forward pass
+                h_t = self.extract_backbone_features(
+                    x=X,
+                    cond=step_cond,
+                    text=text,
+                    time=t_continuous,
+                    mask=mask,
+                    drop_audio_cond=False,
+                    drop_text=False,
+                )
+                
+                # Solve ODE for Y using the head
+                Y_0 = torch.randn_like(X)
+                
+                def ode_fn(s, y):
+                    s_batch = torch.full((batch_size,), s.item(), device=device, dtype=cond.dtype)
+                    return self.head(h_t, y, s_batch)
+                
+                s_span = torch.linspace(0, 1, self.ode_solver_steps + 1, device=device, dtype=cond.dtype)
+                Y_trajectory = odeint(
+                    ode_fn,
+                    Y_0,
+                    s_span,
+                    method=self.ode_solver_method,
+                )
+                Y_final = Y_trajectory[-1]
+            else:
+                # With CFG, need both conditional and unconditional passes
+                # Extract conditional features
+                h_t_cond = self.extract_backbone_features(
+                    x=X,
+                    cond=step_cond,
+                    text=text,
+                    time=t_continuous,
+                    mask=mask,
+                    drop_audio_cond=False,
+                    drop_text=False,
+                )
+                
+                # Extract unconditional features
+                h_t_uncond = self.extract_backbone_features(
+                    x=X,
+                    cond=step_cond,
+                    text=text,
+                    time=t_continuous,
+                    mask=mask,
+                    drop_audio_cond=True,
+                    drop_text=True,
+                )
+                
+                # Solve ODE with CFG
+                Y_0 = torch.randn_like(X)
+                
+                def ode_fn_cfg(s, y):
+                    s_batch = torch.full((batch_size,), s.item(), device=device, dtype=cond.dtype)
+                    # Predict with both conditional and unconditional
+                    v_cond = self.head(h_t_cond, y, s_batch)
+                    v_uncond = self.head(h_t_uncond, y, s_batch)
+                    # Apply CFG
+                    return v_cond + (v_cond - v_uncond) * cfg_strength
+                
+                s_span = torch.linspace(0, 1, self.ode_solver_steps + 1, device=device, dtype=cond.dtype)
+                Y_trajectory = odeint(
+                    ode_fn_cfg,
+                    Y_0,
+                    s_span,
+                    method=self.ode_solver_method,
+                )
+                Y_final = Y_trajectory[-1]
             
             # Update global state: X_{t+1} = X_t + (1/T) * Y_final
             X = X + (1.0 / T) * Y_final

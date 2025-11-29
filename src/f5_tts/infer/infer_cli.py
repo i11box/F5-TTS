@@ -20,6 +20,7 @@ from f5_tts.infer.utils_infer import (
     device,
     fix_duration,
     infer_process,
+    load_dtm_model,
     load_model,
     load_vocoder,
     mel_spec_type,
@@ -174,6 +175,21 @@ parser.add_argument(
     type=str,
     help="Specify the device to run on",
 )
+parser.add_argument(
+    "--use_dtm",
+    action="store_true",
+    help="Use DTM model for fast inference (4-8 steps vs 32 steps)",
+)
+parser.add_argument(
+    "--dtm_checkpoint",
+    type=str,
+    help="Path to DTM checkpoint file (required if --use_dtm is set)",
+)
+parser.add_argument(
+    "--dtm_steps",
+    type=int,
+    help="Number of DTM inference steps (4-8 recommended, default 8)",
+)
 args = parser.parse_args()
 
 
@@ -222,6 +238,11 @@ speed = args.speed or config.get("speed", speed)
 fix_duration = args.fix_duration or config.get("fix_duration", fix_duration)
 device = args.device or config.get("device", device)
 
+# DTM-specific parameters
+use_dtm = args.use_dtm or config.get("use_dtm", False)
+dtm_checkpoint = args.dtm_checkpoint or config.get("dtm_checkpoint", "")
+dtm_steps = args.dtm_steps or config.get("dtm_steps", 8)
+
 
 # patches for pip pkg user
 if "infer/examples/" in ref_audio:
@@ -265,35 +286,66 @@ vocoder = load_vocoder(
 
 # load TTS model
 
-model_cfg = OmegaConf.load(
-    args.model_cfg or config.get("model_cfg", str(files("f5_tts").joinpath(f"configs/{model}.yaml")))
-)
-model_cls = get_class(f"f5_tts.model.{model_cfg.model.backbone}")
-model_arc = model_cfg.model.arch
+if use_dtm:
+    # Load DTM model for fast inference
+    if not dtm_checkpoint:
+        raise ValueError("--dtm_checkpoint must be specified when using --use_dtm")
+    
+    print(f"Using DTM model with {dtm_steps} steps (vs 32 for standard inference)...")
+    
+    # Load model config for backbone
+    model_cfg = OmegaConf.load(
+        args.model_cfg or config.get("model_cfg", str(files("f5_tts").joinpath(f"configs/{model}.yaml")))
+    )
+    model_cls = get_class(f"f5_tts.model.{model_cfg.model.backbone}")
+    model_arc = model_cfg.model.arch
+    
+    ema_model = load_dtm_model(
+        backbone_cls=model_cls,
+        backbone_cfg=model_arc,
+        dtm_ckpt_path=dtm_checkpoint,
+        global_timesteps=dtm_steps,
+        ode_solver_steps=1,
+        ode_solver_method="euler",
+        mel_spec_type=vocoder_name,
+        vocab_file=vocab_file,
+        device=device,
+    )
+    
+    # Override nfe_step for DTM
+    nfe_step = dtm_steps
+    
+else:
+    # Load standard F5-TTS/E2-TTS model
+    model_cfg = OmegaConf.load(
+        args.model_cfg or config.get("model_cfg", str(files("f5_tts").joinpath(f"configs/{model}.yaml")))
+    )
+    model_cls = get_class(f"f5_tts.model.{model_cfg.model.backbone}")
+    model_arc = model_cfg.model.arch
 
-repo_name, ckpt_step, ckpt_type = "F5-TTS", 1250000, "safetensors"
+    repo_name, ckpt_step, ckpt_type = "F5-TTS", 1250000, "safetensors"
 
-if model != "F5TTS_Base":
-    assert vocoder_name == model_cfg.model.mel_spec.mel_spec_type
+    if model != "F5TTS_Base":
+        assert vocoder_name == model_cfg.model.mel_spec.mel_spec_type
 
-# override for previous models
-if model == "F5TTS_Base":
-    if vocoder_name == "vocos":
+    # override for previous models
+    if model == "F5TTS_Base":
+        if vocoder_name == "vocos":
+            ckpt_step = 1200000
+        elif vocoder_name == "bigvgan":
+            model = "F5TTS_Base_bigvgan"
+            ckpt_type = "pt"
+    elif model == "E2TTS_Base":
+        repo_name = "E2-TTS"
         ckpt_step = 1200000
-    elif vocoder_name == "bigvgan":
-        model = "F5TTS_Base_bigvgan"
-        ckpt_type = "pt"
-elif model == "E2TTS_Base":
-    repo_name = "E2-TTS"
-    ckpt_step = 1200000
 
-if not ckpt_file:
-    ckpt_file = str(cached_path(f"hf://SWivid/{repo_name}/{model}/model_{ckpt_step}.{ckpt_type}"))
+    if not ckpt_file:
+        ckpt_file = str(cached_path(f"hf://SWivid/{repo_name}/{model}/model_{ckpt_step}.{ckpt_type}"))
 
-print(f"Using {model}...")
-ema_model = load_model(
-    model_cls, model_arc, ckpt_file, mel_spec_type=vocoder_name, vocab_file=vocab_file, device=device
-)
+    print(f"Using {model}...")
+    ema_model = load_model(
+        model_cls, model_arc, ckpt_file, mel_spec_type=vocoder_name, vocab_file=vocab_file, device=device
+    )
 
 
 # inference process

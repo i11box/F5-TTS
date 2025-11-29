@@ -106,9 +106,9 @@ if __name__ == "__main__":
         + tokenizer
     )
     dataset_paths = [
-        "<SOME_PATH>/WenetSpeech4TTS/Basic",
-        "<SOME_PATH>/WenetSpeech4TTS/Standard",
-        "<SOME_PATH>/WenetSpeech4TTS/Premium",
+        "/inspire/hdd/global_public/public_datas/speech/wenetspeech4tts/Basic",
+        "/inspire/hdd/global_public/public_datas/speech/wenetspeech4tts/Standard",
+        "/inspire/hdd/global_public/public_datas/speech/wenetspeech4tts/Premium",
     ][-dataset_choice:]
     save_dir = str(files("f5_tts").joinpath("../../")) + f"/data/{dataset_name}"
     print(f"\nChoose Dataset: {dataset_name}, will save to {save_dir}\n")

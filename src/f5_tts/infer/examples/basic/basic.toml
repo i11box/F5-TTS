@@ -9,3 +9,6 @@ gen_file = ""
 remove_silence = false
 output_dir = "tests"
 output_file = "infer_cli_basic.wav"
+
+ckpt_file = "ckpts/F5TTS_v1_Base/model_1250000.safetensors"
+vocab_file = "ckpts/F5TTS_v1_Base/vocab.txt"

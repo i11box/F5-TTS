@@ -19,7 +19,7 @@ from f5_tts.model.utils import get_tokenizer
 
 os.chdir(str(files("f5_tts").joinpath("../..")))  # change working directory to root of project
 
-
+# TODO:这里是不是只加了DiT Backbone的？理想状况下应该除了那个DTM Head都要加
 def load_backbone_from_checkpoint(
     checkpoint_path: str,
     model_cls,
@@ -54,7 +54,10 @@ def load_backbone_from_checkpoint(
     
     print(f"Loading pretrained backbone from {checkpoint_path}")
     
+<<<<<<< HEAD
     # Check checkpoint format and load accordingly
+=======
+>>>>>>> 9186880 (prepare data)
     ckpt_type = checkpoint_path.split(".")[-1].lower()
     if ckpt_type == "safetensors":
         try:

@@ -13,7 +13,7 @@ optim:
   epochs: 5  # fewer epochs needed for DTM head training
   learning_rate: 1e-4  # learning rate for head training
   num_warmup_updates: 5000  # warmup updates
-  grad_accumulation_steps: 1  # note: updates = steps / grad_accumulation_steps
+  grad_accumulation_steps: 8  # note: updates = steps / grad_accumulation_steps，8是为了实现和原版一样的批量
   max_grad_norm: 1.0  # gradient clipping
   bnb_optimizer: False  # use bnb 8bit AdamW optimizer or not
 
@@ -49,7 +49,7 @@ model:
   # DTM-specific parameters
   dtm:
     global_timesteps: 8  # T: number of global timesteps (4-8 recommended)
-    ode_solver_steps: 1  # number of substeps for microscopic ODE (1 for single-step Euler)
+    ode_solver_steps: 4  # number of substeps for microscopic ODE (1 for single-step Euler)
     ode_solver_method: euler  # euler | midpoint
     # Classifier-free guidance (CFG) parameters
     audio_drop_prob: 0.3  # probability to drop audio conditioning (like CFM)
@@ -71,9 +71,9 @@ model:
 
 ckpts:
   # Pretrained backbone checkpoint path (REQUIRED)
-  backbone_checkpoint_path: ckpts/F5TTS_Base/model_last.pt  # path to pretrained F5-TTS checkpoint
+  backbone_checkpoint_path: /inspire/hdd/project/video-generation/chenxie-25019/hyr/F5-TTS/ckpts/F5TTS_v1_Base/model_1250000.safetensors  # path to pretrained F5-TTS checkpoint
   
-  logger: wandb  # wandb | tensorboard | null
+  logger: tensorboard  # wandb | tensorboard | null
   log_samples: True  # infer random sample per save checkpoint
   save_per_updates: 10000  # save checkpoint per updates
   keep_last_n_checkpoints: 5  # keep last N checkpoints

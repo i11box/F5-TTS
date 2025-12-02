@@ -123,6 +123,7 @@ class DTM(nn.Module):
         mask: torch.Tensor | None = None,  # [batch, seq_len]
         drop_audio_cond: bool = False,
         drop_text: bool = False,
+        cfg_infer: bool = False,  # CFG inference mode (only for inference)
     ) -> torch.Tensor:
         """
         Extract features from frozen backbone (before final projection).
@@ -130,9 +131,10 @@ class DTM(nn.Module):
         Args:
             drop_audio_cond: Whether to drop audio conditioning (for CFG)
             drop_text: Whether to drop text conditioning (for CFG)
+            cfg_infer: If True, pack cond & uncond in batch dim (DiT-style CFG)
         
         Returns:
-            h_t: Backbone features [batch, seq_len, backbone_dim]
+            h_t: Backbone features [batch, seq_len, backbone_dim] or [2*batch, seq_len, backbone_dim] if cfg_infer
         """
         # Get backbone hidden dimension
         batch_size, seq_len = x.shape[0], x.shape[1]
@@ -141,29 +143,51 @@ class DTM(nn.Module):
         if time.ndim == 0:
             time = time.repeat(batch_size)
         
-        # Get input embeddings (x, cond, text)
-        x_embedded = self.backbone.get_input_embed(
-            x, cond, text,
-            drop_audio_cond=drop_audio_cond,
-            drop_text=drop_text,
-            cache=False,
-            audio_mask=mask,
-        )
-        
-        # Get time embedding
-        t_emb = self.backbone.time_embed(time)
+        # CFG inference mode: pack cond & uncond forward (like DiT)
+        if cfg_infer:
+            # Conditional forward
+            x_cond = self.backbone.get_input_embed(
+                x, cond, text,
+                drop_audio_cond=False,
+                drop_text=False,
+                cache=False,
+                audio_mask=mask,
+            )
+            # Unconditional forward
+            x_uncond = self.backbone.get_input_embed(
+                x, cond, text,
+                drop_audio_cond=True,
+                drop_text=True,
+                cache=False,
+                audio_mask=mask,
+            )
+            # Concatenate in batch dimension
+            x_embedded = torch.cat((x_cond, x_uncond), dim=0)
+            t_emb = torch.cat((self.backbone.time_embed(time), self.backbone.time_embed(time)), dim=0)
+            mask_packed = torch.cat((mask, mask), dim=0) if mask is not None else None
+        else:
+            # Normal forward
+            x_embedded = self.backbone.get_input_embed(
+                x, cond, text,
+                drop_audio_cond=drop_audio_cond,
+                drop_text=drop_text,
+                cache=False,
+                audio_mask=mask,
+            )
+            t_emb = self.backbone.time_embed(time)
+            mask_packed = mask
         
         # Forward through transformer blocks
         rope = self.backbone.rotary_embed.forward_from_seq_len(seq_len)
         
         h = x_embedded
         for block in self.backbone.transformer_blocks:
-            h = block(h, t_emb, mask=mask, rope=rope)
+            h = block(h, t_emb, mask=mask_packed, rope=rope)
         
         # Apply final norm (but not projection)
         h_t = self.backbone.norm_out(h, t_emb)
         
-        return h_t  # [batch, seq_len, backbone_dim]
+        return h_t  # [batch, seq_len, backbone_dim] or [2*batch, seq_len, backbone_dim] if cfg_infer
     
     def forward(
         self,
@@ -242,6 +266,8 @@ class DTM(nn.Module):
             drop_text = False
         
         # Extract frozen backbone features h_t
+        # Training: directly forward once with drop flags (like CFM)
+        # No need to pack cond & uncond during training
         with torch.no_grad():
             h_t = self.extract_backbone_features(
                 x=X_t,
@@ -251,32 +277,44 @@ class DTM(nn.Module):
                 mask=mask,
                 drop_audio_cond=drop_audio_cond,
                 drop_text=drop_text,
+                cfg_infer=False,  # Training时不用cfg_infer
             )
         
         # Compute target displacement Y = X_T - X_0
         Y = X_T - X_0
         
-        # Sample microscopic time s uniformly from [0, 1]
-        s = torch.rand((batch_size,), device=device, dtype=dtype)
+        # Flatten for token-level processing (following paper's reference implementation)
+        # h_t: [batch, seq_len, backbone_dim] -> [batch*seq_len, backbone_dim]
+        # Y: [batch, seq_len, mel_dim] -> [batch*seq_len, mel_dim]
+        # t_continuous: [batch] -> [batch*seq_len]
+        h_t_flat = h_t.reshape(batch_size * seq_len, -1)  # [batch*seq_len, backbone_dim]
+        Y_flat = Y.reshape(batch_size * seq_len, -1)  # [batch*seq_len, mel_dim]
+        t_flat = t_continuous.unsqueeze(1).expand(-1, seq_len).reshape(-1)  # [batch*seq_len]
+        
+        # Also flatten the mask for later use
+        rand_span_mask_flat = rand_span_mask.reshape(-1)  # [batch*seq_len]
+        
+        # Sample microscopic time s uniformly from [0, 1] for each token
+        s = torch.rand((batch_size * seq_len,), device=device, dtype=dtype)
         
         # Sample microscopic noise
-        Y_noise = torch.randn_like(Y)
+        Y_noise = torch.randn_like(Y_flat)
         
         # Compute Y_s = (1 - s) * Y_noise + s * Y
-        s_expand = s.unsqueeze(-1).unsqueeze(-1)  # [batch, 1, 1]
-        Y_s = (1 - s_expand) * Y_noise + s_expand * Y
+        s_expand = s.unsqueeze(-1)  # [batch*seq_len, 1]
+        Y_s = (1 - s_expand) * Y_noise + s_expand * Y_flat
         
-        # Forward through trainable head
-        v_pred = self.head(h_t, Y_s, s)
+        # Forward through trainable head (now accepts flattened input)
+        v_pred = self.head(h_t_flat, Y_s, s)
         
         # Compute target velocity: Y - Y_noise
-        v_target = Y - Y_noise
+        v_target = Y_flat - Y_noise
         
         # Compute MSE loss with mask (like CFM, only on masked region)
-        loss = F.mse_loss(v_pred, v_target, reduction='none')  # [batch, seq_len, mel_dim]
+        loss = F.mse_loss(v_pred, v_target, reduction='none')  # [batch*seq_len, mel_dim]
         
         # Apply rand_span_mask to only compute loss on the region to be predicted
-        loss = loss[rand_span_mask]
+        loss = loss[rand_span_mask_flat]
         loss = loss.mean()
         
         return loss, cond, v_pred
@@ -377,7 +415,7 @@ class DTM(nn.Module):
             # Current global time (normalized to [0, 1])
             t_continuous = torch.full((batch_size,), t / T, device=device, dtype=cond.dtype)
             
-            # Extract backbone features h_t
+            # Extract backbone features h_t with CFG (DiT-style batch packing)
             if cfg_strength < 1e-5:
                 # No CFG, single forward pass
                 h_t = self.extract_backbone_features(
@@ -388,6 +426,7 @@ class DTM(nn.Module):
                     mask=mask,
                     drop_audio_cond=False,
                     drop_text=False,
+                    cfg_infer=False,
                 )
                 
                 # Solve ODE for Y using the head
@@ -406,28 +445,17 @@ class DTM(nn.Module):
                 )
                 Y_final = Y_trajectory[-1]
             else:
-                # With CFG, need both conditional and unconditional passes
-                # Extract conditional features
-                h_t_cond = self.extract_backbone_features(
+                # With CFG: pack cond & uncond in batch dimension (DiT-style)
+                h_t_cfg = self.extract_backbone_features(
                     x=X,
                     cond=step_cond,
                     text=text,
                     time=t_continuous,
                     mask=mask,
-                    drop_audio_cond=False,
-                    drop_text=False,
+                    cfg_infer=True,  # Pack cond & uncond forward
                 )
-                
-                # Extract unconditional features
-                h_t_uncond = self.extract_backbone_features(
-                    x=X,
-                    cond=step_cond,
-                    text=text,
-                    time=t_continuous,
-                    mask=mask,
-                    drop_audio_cond=True,
-                    drop_text=True,
-                )
+                # Split conditional and unconditional features
+                h_t_cond, h_t_uncond = torch.chunk(h_t_cfg, 2, dim=0)
                 
                 # Solve ODE with CFG
                 Y_0 = torch.randn_like(X)

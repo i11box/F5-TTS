@@ -284,37 +284,14 @@ class DTM(nn.Module):
         # Compute target displacement Y = X_T - X_0
         Y = X_T - X_0
         
-        # Flatten for token-level processing (following paper's reference implementation)
-        # h_t: [batch, seq_len, backbone_dim] -> [batch*seq_len, backbone_dim]
-        # Y: [batch, seq_len, mel_dim] -> [batch*seq_len, mel_dim]
-        # t_continuous: [batch] -> [batch*seq_len]
-        h_t_flat = h_t.reshape(batch_size * seq_len, -1)  # [batch*seq_len, backbone_dim]
-        Y_flat = Y.reshape(batch_size * seq_len, -1)  # [batch*seq_len, mel_dim]
-        
-        # Also flatten the mask for later use
-        rand_span_mask_flat = rand_span_mask.reshape(-1)  # [batch*seq_len]
-        
-        # Sample microscopic time s uniformly from [0, 1] for each token
-        s = torch.rand((batch_size * seq_len,), device=device, dtype=dtype)
-        
-        # Sample microscopic noise
-        Y_noise = torch.randn_like(Y_flat)
-        
-        # Compute Y_s = (1 - s) * Y_noise + s * Y
-        s_expand = s.unsqueeze(-1)  # [batch*seq_len, 1]
-        Y_s = (1 - s_expand) * Y_noise + s_expand * Y_flat
-        
         # Forward through trainable head (now accepts flattened input)
-        v_pred = self.head(h_t_flat, Y_s, s)
-        
-        # Compute target velocity: Y - Y_noise
-        v_target = Y_flat - Y_noise
+        v_pred = self.head(h_t)
         
         # Compute MSE loss with mask (like CFM, only on masked region)
-        loss = F.mse_loss(v_pred, v_target, reduction='none')  # [batch*seq_len, mel_dim]
+        loss = F.mse_loss(v_pred, Y, reduction='none')  # [batch*seq_len, mel_dim]
         
         # Apply rand_span_mask to only compute loss on the region to be predicted
-        loss = loss[rand_span_mask_flat]
+        loss = loss[rand_span_mask]
         loss = loss.mean()
         
         return loss, cond, v_pred
@@ -418,96 +395,48 @@ class DTM(nn.Module):
         if sway_sampling_coef is not None:
              t_steps = t_steps + sway_sampling_coef * (torch.cos(torch.pi / 2 * t_steps) - 1 + t_steps)
         
-        # DTM Loop
-        for i in range(T):
-            t_curr = t_steps[i]
-            t_next = t_steps[i+1]
-            dt = t_next - t_curr # Dynamic step size based on Sway Sampling
-
-            # Current global time (continuous)
-            t_continuous = torch.full((batch_size,), t_curr, device=device, dtype=cond.dtype)
+        def vector_field(t, x):
+            t_batch = t.expand(batch_size).to(device).type(x.dtype)
+            h_t_cfg = self.extract_backbone_features(
+                x=x,
+                cond=step_cond,
+                text=text,
+                time=t_batch,
+                mask=mask,
+                cfg_infer=True
+            )
+            h_cond, h_uncond = torch.chunk(h_t_cfg, 2, dim=0)
             
-            # Extract backbone features h_t with CFG (DiT-style batch packing)
-            if cfg_strength < 1e-5:
-                # No CFG, single forward pass
-                h_t = self.extract_backbone_features(
-                    x=X,
-                    cond=step_cond,
-                    text=text,
-                    time=t_continuous,
-                    mask=mask,
-                    drop_audio_cond=False,
-                    drop_text=False,
-                    cfg_infer=False,
-                )
-                
-                # Solve ODE for Y using the head (Inner loop micro-step)
-                # Note: Inner loop usually uses standard uniform steps or simple midpoint
-                # No Sway Sampling needed here as this is a local approximation
-                Y_0 = torch.randn_like(X)
-                
-                def ode_fn(s, y):
-                    s_batch = torch.full((batch_size,), s.item(), device=device, dtype=cond.dtype)
-                    return self.head(h_t, y, s_batch)
-                
-                s_span = torch.linspace(0, 1, self.ode_solver_steps + 1, device=device, dtype=cond.dtype)
-                Y_trajectory = odeint(
-                    ode_fn,
-                    Y_0,
-                    s_span,
-                    method=self.ode_solver_method,
-                )
-                Y_final = Y_trajectory[-1]
-            else:
-                # With CFG: pack cond & uncond in batch dimension (DiT-style)
-                h_t_cfg = self.extract_backbone_features(
-                    x=X,
-                    cond=step_cond,
-                    text=text,
-                    time=t_continuous,
-                    mask=mask,
-                    cfg_infer=True,  # Pack cond & uncond forward
-                )
-                # Split conditional and unconditional features
-                h_t_cond, h_t_uncond = torch.chunk(h_t_cfg, 2, dim=0)
-                
-                # Solve ODE with CFG
-                Y_0 = torch.randn_like(X)
-                
-                def ode_fn_cfg(s, y):
-                    s_batch = torch.full((batch_size,), s.item(), device=device, dtype=cond.dtype)
-                    # Predict with both conditional and unconditional
-                    v_cond = self.head(h_t_cond, y, s_batch)
-                    v_uncond = self.head(h_t_uncond, y, s_batch)
-                    # Apply CFG
-                    return v_cond + (v_cond - v_uncond) * cfg_strength
-                
-                s_span = torch.linspace(0, 1, self.ode_solver_steps + 1, device=device, dtype=cond.dtype)
-                # Inner loop usually doesn't need sway sampling, standard linear is fine
-                Y_trajectory = odeint(
-                    ode_fn_cfg,
-                    Y_0,
-                    s_span,
-                    method=self.ode_solver_method,
-                )
-                Y_final = Y_trajectory[-1]
+            # 2. Head 分别预测
+            v_cond = self.head(h_cond)
+            v_uncond = self.head(h_uncond)
             
-            # Update global state: X_{t+1} = X_t + dt * Y_final
-            # --- MODIFIED: Use dynamic dt from Sway Sampling ---
-            # Standard DTM uses 1/T, but with Sway Sampling we use (t_next - t_curr)
-            X = X + dt * Y_final
+            # 3. CFG 公式: v = uncond + cfg * (cond - uncond)
+            v_final = v_cond + cfg_strength * (v_cond - v_uncond)
             
-            trajectory.append(X.clone())
+            return v_final
+                
+        # 3. 执行积分
+        # odeint 会自动计算每一步的 dt = t_steps[i+1] - t_steps[i]
+        # 并调用 vector_field(t_steps[i], x_i)
+        trajectory = odeint(
+            vector_field,
+            X,              # 初始状态 X0 (高斯噪声)
+            t_steps,        # 积分的时间点
+            method='euler'  # 使用 Euler 方法 (同你手写的逻辑)
+            # method='midpoint' # 如果想更高精度，可以换成这个
+        )
         
-        # Final output
-        out = X
+        # trajectory shape: [T+1, batch, seq_len, mel_dim]
+        # 取最后一个时间点作为结果
+        out = trajectory[-1]
         out = torch.where(cond_mask, cond, out)  # Keep conditioning part
         
         if exists(vocoder):
             out = out.permute(0, 2, 1)
             out = vocoder(out)
         
-        trajectory = torch.stack(trajectory, dim=0)  # [T+1, batch, seq_len, mel_dim]
+        # trajectory = torch.stack(trajectory, dim=0)  # [T+1, batch, seq_len, mel_dim]
         
         return out, trajectory
 

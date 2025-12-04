@@ -114,7 +114,7 @@ class DTMHead(nn.Module):
         ])
         
         # Output projection: hidden_dim -> mel_dim
-        self.output_proj = nn.Linear(hidden_dim, mel_dim)
+        self.output_proj = nn.Linear(backbone_dim, mel_dim)
         
         # Initialize output projection to zero (for stability)
         nn.init.constant_(self.output_proj.weight, 0)
@@ -123,53 +123,12 @@ class DTMHead(nn.Module):
     def forward(
         self,
         h_t: torch.Tensor,  # Backbone features [N, backbone_dim] where N=batch*seq_len
-        y_s: torch.Tensor,  # Flow state [N, mel_dim] where N=batch*seq_len
-        s: torch.Tensor,  # Microscopic time [N] where N=batch*seq_len, or scalar
+        y_s: torch.Tensor = None,  # Flow state [N, mel_dim] where N=batch*seq_len
+        s: torch.Tensor = None,  # Microscopic time [N] where N=batch*seq_len, or scalar
     ) -> torch.Tensor:
-        """
-        Forward pass of DTM Head.
-        
-        This follows the paper's reference implementation where inputs are flattened
-        to process each token independently with its own microscopic time.
-        
-        Args:
-            h_t: Backbone features [N, backbone_dim] where N=batch*seq_len
-            y_s: Current flow state [N, mel_dim] where N=batch*seq_len
-            s: Microscopic time [N] where N=batch*seq_len, or scalar
-        
-        Returns:
-            Predicted velocity field [N, mel_dim] where N=batch*seq_len
-        """
-        num_tokens = h_t.shape[0]
-        
-        # Handle scalar time
-        if s.ndim == 0:
-            s = s.repeat(num_tokens)
-        
-        # Time embedding [N, hidden_dim]
-        time_emb = self.time_embed(s)
-        
-        # Concatenate backbone features and flow state
-        # h_t: [N, backbone_dim]
-        # y_s: [N, mel_dim]
-        x = torch.cat([h_t, y_s], dim=-1)  # [N, backbone_dim + mel_dim]
-        
-        # Input projection
-        x = self.input_proj(x)  # [N, hidden_dim]
-        
-        # Add sequence dimension for compatibility with AdaLayerNorm
-        # AdaLayerNorm expects [batch, seq_len, dim], so we treat each token as a batch
-        x = x.unsqueeze(1)  # [N, 1, hidden_dim]
-        
-        # Apply MLP blocks with time conditioning
-        for block in self.blocks:
-            x = block(x, time_emb)  # [N, 1, hidden_dim]
-        
-        # Remove sequence dimension
-        x = x.squeeze(1)  # [N, hidden_dim]
         
         # Output projection to predict velocity field
-        v = self.output_proj(x)  # [N, mel_dim]
+        v = self.output_proj(h_t)  # [N, mel_dim]
         
         return v
 

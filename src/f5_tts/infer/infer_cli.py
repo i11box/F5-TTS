@@ -188,7 +188,14 @@ parser.add_argument(
 parser.add_argument(
     "--dtm_steps",
     type=int,
+    default=8,
     help="Number of DTM inference steps (4-8 recommended, default 8)",
+)
+parser.add_argument(
+    "--ode_steps",
+    type=int,
+    default=4,
+    help="Number of Flow Head inference steps (4-8 recommended, default 4)",
 )
 args = parser.parse_args()
 
@@ -227,7 +234,7 @@ if save_chunk and use_legacy_text:
 
 remove_silence = args.remove_silence or config.get("remove_silence", False)
 load_vocoder_from_local = args.load_vocoder_from_local or config.get("load_vocoder_from_local", False)
-
+ode_solver_steps = args.ode_steps
 vocoder_name = args.vocoder_name or config.get("vocoder_name", mel_spec_type)
 target_rms = args.target_rms or config.get("target_rms", target_rms)
 cross_fade_duration = args.cross_fade_duration or config.get("cross_fade_duration", cross_fade_duration)
@@ -305,7 +312,7 @@ if use_dtm:
         backbone_cfg=model_arc,
         dtm_ckpt_path=dtm_checkpoint,
         global_timesteps=dtm_steps,
-        ode_solver_steps=1,
+        ode_solver_steps=ode_solver_steps,
         ode_solver_method="euler",
         mel_spec_type=vocoder_name,
         vocab_file=vocab_file,

@@ -22,20 +22,6 @@ output_dir = "tests"
 # output_file = "output_dtm.wav"  # 默认会自动生成带时间戳的文件名
 
 # 推理参数（DTM 不支持 sway_sampling_coef）
-nfe_step = 8  # 会被 dtm_steps 覆盖
+nfe_step = 32  # 会被 dtm_steps 覆盖
 cfg_strength = 1.0  # 分类器自由引导强度
-
-# 音频处理
-target_rms = 0.1  # 目标响度
-cross_fade_duration = 0.15  # 音频片段之间的交叉淡化时长（秒）
-remove_silence = false  # 是否移除生成音频中的长静音
-
-# Vocoder 配置
-vocoder_name = "vocos"  # vocos | bigvgan
-load_vocoder_from_local = false
-# local_vocoder_path = "../checkpoints/vocos-mel-24khz"
-
-# 其他选项
-save_chunk = false  # 是否保存每个音频片段
-no_legacy_text = false  # 不使用 ASCII 转写用于文件名
 

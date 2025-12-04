@@ -10,9 +10,9 @@ datasets:
   num_workers: 4
 
 optim:
-  epochs: 20  # fewer epochs needed for DTM head training
-  learning_rate: 5e-4  # learning rate for head training
-  num_warmup_updates: 500  # warmup updates
+  epochs: 25  # fewer epochs needed for DTM head training
+  learning_rate: 5e-5  # learning rate for head training
+  num_warmup_updates: 2000  # warmup updates
   grad_accumulation_steps: 2  # note: updates = steps / grad_accumulation_steps，8是为了实现和原版一样的批量
   max_grad_norm: 1.0  # gradient clipping
   bnb_optimizer: False  # use bnb 8bit AdamW optimizer or not
@@ -49,7 +49,7 @@ model:
   # DTM-specific parameters
   dtm:
     global_timesteps: 8  # T: number of global timesteps (4-8 recommended)
-    ode_solver_steps: 4  # number of substeps for microscopic ODE (1 for single-step Euler)
+    ode_solver_steps: 64  # number of substeps for microscopic ODE (1 for single-step Euler)
     ode_solver_method: euler  # euler | midpoint
     # Classifier-free guidance (CFG) parameters
     audio_drop_prob: 0.3  # probability to drop audio conditioning (like CFM)

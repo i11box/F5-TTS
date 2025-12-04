@@ -30,7 +30,7 @@ from vocos import Vocos
 
 from f5_tts.model import CFM, DiT, DTM, DTMHead
 from f5_tts.model.utils import convert_char_to_pinyin, get_tokenizer
-
+from f5_tts.scripts.heatmap_drawing import plot_mel_spectrogram
 
 _ref_audio_cache = {}
 _ref_text_cache = {}
@@ -576,11 +576,14 @@ def infer_batch_process(
                 cfg_strength=cfg_strength,
                 sway_sampling_coef=sway_sampling_coef,
             )
+
             del _
 
             generated = generated.to(torch.float32)  # generated mel spectrogram
             generated = generated[:, ref_audio_len:, :]
+
             generated = generated.permute(0, 2, 1)
+            plot_mel_spectrogram(generated)
             if mel_spec_type == "vocos":
                 generated_wave = vocoder.decode(generated)
             elif mel_spec_type == "bigvgan":

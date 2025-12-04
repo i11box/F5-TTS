@@ -109,6 +109,7 @@ class DTM(nn.Module):
         
         # Vocab map for tokenization
         self.vocab_char_map = vocab_char_map
+        print(f'my ode {ode_solver_steps}')
     
     @property
     def device(self):
@@ -247,11 +248,11 @@ class DTM(nn.Module):
         
         # Sample discrete timestep t uniformly from {1, ..., T-1}
         # We use continuous time in [0, 1] for compatibility with backbone
-        t = torch.randint(0, self.T, (batch_size,), device=device, dtype=torch.long)
-        t_continuous = t.float() / self.T  # Normalize to [0, 1]
+        # t = torch.randint(0, self.T, (batch_size,), device=device, dtype=torch.long)
+        t_continuous = torch.rand((batch_size,), device=device, dtype=X_T.dtype)  # Normalize to [0, 1]
         
         # Compute X_t = (1 - t/T) * X_0 + (t/T) * X_T
-        t_ratio = t.float().unsqueeze(-1).unsqueeze(-1) / self.T  # [batch, 1, 1]
+        t_ratio = t_continuous.unsqueeze(-1).unsqueeze(-1) # [batch, 1, 1]
         X_t = (1 - t_ratio) * X_0 + t_ratio * X_T
         
         # Only predict what is within the random mask span for infilling (like CFM)
@@ -289,7 +290,6 @@ class DTM(nn.Module):
         # t_continuous: [batch] -> [batch*seq_len]
         h_t_flat = h_t.reshape(batch_size * seq_len, -1)  # [batch*seq_len, backbone_dim]
         Y_flat = Y.reshape(batch_size * seq_len, -1)  # [batch*seq_len, mel_dim]
-        t_flat = t_continuous.unsqueeze(1).expand(-1, seq_len).reshape(-1)  # [batch*seq_len]
         
         # Also flatten the mask for later use
         rand_span_mask_flat = rand_span_mask.reshape(-1)  # [batch*seq_len]
@@ -410,10 +410,22 @@ class DTM(nn.Module):
         
         # Algorithm 4: Loop over global timesteps
         trajectory = [X.clone()]
+        # Generate time steps t_0, t_1, ..., t_N using Sway Sampling
+        # This is where Sway Sampling belongs in DTM (scheduling the global trajectory)
+        t_steps = torch.linspace(0, 1, T + 1, device=device, dtype=cond.dtype)
         
-        for t in range(T):
-            # Current global time (normalized to [0, 1])
-            t_continuous = torch.full((batch_size,), t / T, device=device, dtype=cond.dtype)
+        # Apply Sway Sampling to the global time schedule
+        if sway_sampling_coef is not None:
+             t_steps = t_steps + sway_sampling_coef * (torch.cos(torch.pi / 2 * t_steps) - 1 + t_steps)
+        
+        # DTM Loop
+        for i in range(T):
+            t_curr = t_steps[i]
+            t_next = t_steps[i+1]
+            dt = t_next - t_curr # Dynamic step size based on Sway Sampling
+
+            # Current global time (continuous)
+            t_continuous = torch.full((batch_size,), t_curr, device=device, dtype=cond.dtype)
             
             # Extract backbone features h_t with CFG (DiT-style batch packing)
             if cfg_strength < 1e-5:
@@ -429,7 +441,9 @@ class DTM(nn.Module):
                     cfg_infer=False,
                 )
                 
-                # Solve ODE for Y using the head
+                # Solve ODE for Y using the head (Inner loop micro-step)
+                # Note: Inner loop usually uses standard uniform steps or simple midpoint
+                # No Sway Sampling needed here as this is a local approximation
                 Y_0 = torch.randn_like(X)
                 
                 def ode_fn(s, y):
@@ -469,8 +483,7 @@ class DTM(nn.Module):
                     return v_cond + (v_cond - v_uncond) * cfg_strength
                 
                 s_span = torch.linspace(0, 1, self.ode_solver_steps + 1, device=device, dtype=cond.dtype)
-                sway_sampling_coef = 0.0
-                s_span = s_span + sway_sampling_coef * (torch.cos(torch.pi / 2 * s_span) - 1 + s_span)
+                # Inner loop usually doesn't need sway sampling, standard linear is fine
                 Y_trajectory = odeint(
                     ode_fn_cfg,
                     Y_0,
@@ -479,8 +492,10 @@ class DTM(nn.Module):
                 )
                 Y_final = Y_trajectory[-1]
             
-            # Update global state: X_{t+1} = X_t + (1/T) * Y_final
-            X = X + (1.0 / T) * Y_final
+            # Update global state: X_{t+1} = X_t + dt * Y_final
+            # --- MODIFIED: Use dynamic dt from Sway Sampling ---
+            # Standard DTM uses 1/T, but with Sway Sampling we use (t_next - t_curr)
+            X = X + dt * Y_final
             
             trajectory.append(X.clone())
         
@@ -630,3 +645,94 @@ class DTM(nn.Module):
             out = vocoder(out)
             
         return out, trajectory
+    
+    def dum_forward(
+        self,
+        inp: torch.Tensor,  # mel or raw wave [batch, seq_len, mel_dim] or [batch, wave_len]
+        text: torch.Tensor | list[str],  # [batch, text_len]
+        *,
+        lens: torch.Tensor | None = None,  # [batch]
+        noise_scheduler = None # unused
+    ):
+        """
+        Training forward pass (Algorithm 3).
+        
+        Args:
+            inp: Input mel spectrogram or raw waveform
+            text: Text input (tokens or strings)
+            lens: Sequence lengths
+        
+        Returns:
+            loss: MSE loss
+            cond: Conditioning (for logging)
+            pred: Predicted velocity field (for logging)
+        """
+        # Handle raw wave
+        if inp.ndim == 2:
+            inp = self.mel_spec(inp)
+            inp = inp.permute(0, 2, 1)
+            assert inp.shape[-1] == self.num_channels
+        
+        batch_size, seq_len, dtype, device = *inp.shape[:2], inp.dtype, self.device
+        
+        # Handle text as string
+        if isinstance(text, list):
+            if exists(self.vocab_char_map):
+                text = list_str_to_idx(text, self.vocab_char_map).to(device)
+            else:
+                text = list_str_to_tensor(text).to(device)
+            assert text.shape[0] == batch_size
+        
+        # Lens and mask
+        if not exists(lens):
+            lens = torch.full((batch_size,), seq_len, device=device)
+        
+        mask = lens_to_mask(lens, length=seq_len)
+        
+        # Get a random span to mask out for training conditionally (like CFM)
+        frac_lengths = torch.zeros((batch_size,), device=device).float().uniform_(*self.frac_lengths_mask)
+        rand_span_mask = mask_from_frac_lengths(lens, frac_lengths)
+        
+        if exists(mask):
+            rand_span_mask &= mask
+        
+        # mel is x1
+        x1 = inp
+
+        # x0 is gaussian noise
+        x0 = torch.randn_like(x1)
+
+        # time step
+        time = torch.rand((batch_size,), dtype=dtype, device=self.device)
+        # TODO. noise_scheduler
+
+        # sample xt (φ_t(x) in the paper)
+        t = time.unsqueeze(-1).unsqueeze(-1)
+        φ = (1 - t) * x0 + t * x1
+        flow = x1 - x0
+
+        # only predict what is within the random mask span for infilling
+        cond = torch.where(rand_span_mask[..., None], torch.zeros_like(x1), x1)
+
+        # transformer and cfg training with a drop rate
+        drop_audio_cond = random() < self.audio_drop_prob  # p_drop in voicebox paper
+        if random() < self.cond_drop_prob:  # p_uncond in voicebox paper
+            drop_audio_cond = True
+            drop_text = True
+        else:
+            drop_text = False
+
+        # apply mask will use more memory; might adjust batchsize or batchsampler long sequence threshold
+        pred = self.backbone(
+            x=φ, cond=cond, text=text, time=time, drop_audio_cond=drop_audio_cond, drop_text=drop_text, mask=mask
+        )
+
+    
+        # flow matching loss
+        loss = F.mse_loss(pred, flow, reduction="none")
+        loss = loss[rand_span_mask]
+        
+        dummy_loss = 0.0 * sum(p.sum() for p in self.head.parameters())
+        loss = loss + dummy_loss
+
+        return loss.mean(), cond, pred

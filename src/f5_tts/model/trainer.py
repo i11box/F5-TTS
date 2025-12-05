@@ -361,6 +361,7 @@ class Trainer:
                 with self.accelerator.accumulate(self.model):
                     text_inputs = batch["text"]
                     mel_spec = batch["mel"].permute(0, 2, 1)
+                    
                     mel_lengths = batch["mel_lengths"]
 
                     # TODO. add duration predictor training

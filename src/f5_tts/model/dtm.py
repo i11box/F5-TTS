@@ -285,10 +285,11 @@ class DTM(nn.Module):
         Y = X_T - X_0
         
         # Forward through trainable head (now accepts flattened input)
-        v_pred = self.head(h_t)
-        
+        # v_pred = self.head(h_t)
+        v_pred = self.backbone.proj_out(h_t)
+        dummy_loss = 0.0 * sum(p.sum() for p in self.head.parameters())
         # Compute MSE loss with mask (like CFM, only on masked region)
-        loss = F.mse_loss(v_pred, Y, reduction='none')  # [batch*seq_len, mel_dim]
+        loss = F.mse_loss(v_pred, Y, reduction='none') + dummy_loss  # [batch*seq_len, mel_dim]
         
         # Apply rand_span_mask to only compute loss on the region to be predicted
         loss = loss[rand_span_mask]
@@ -329,7 +330,7 @@ class DTM(nn.Module):
             trajectory: Trajectory of generation (for visualization)
         """
         self.eval()
-        self.head = self.backbone.proj_out
+        # self.head = self.backbone.proj_out
         # Handle raw wave conditioning
         if cond.ndim == 2:
             cond = self.mel_spec(cond)

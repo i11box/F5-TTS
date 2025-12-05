@@ -411,6 +411,8 @@ def main():
             fix_duration=fix_duration,
             device=device,
         )
+        inp = audio_segment
+        print(f"[DEBUG] Mel Input Stats: Mean={inp.mean().item():.4f}, Std={inp.std().item():.4f}, Min={inp.min().item():.4f}")
         generated_audio_segments.append(audio_segment)
 
         if save_chunk:

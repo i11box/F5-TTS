@@ -167,6 +167,7 @@ class DiT(nn.Module):
         checkpoint_activations=False,
     ):
         super().__init__()
+
         self.time_embed = TimestepEmbedding(dim)
         if text_dim is None:
             text_dim = mel_dim
@@ -309,18 +310,8 @@ class DiT(nn.Module):
 
         rope = self.rotary_embed.forward_from_seq_len(seq_len)
 
-        if self.long_skip_connection is not None:
-            residual = x
-
         for block in self.transformer_blocks:
-            if self.checkpoint_activations:
-                # https://pytorch.org/docs/stable/checkpoint.html#torch.utils.checkpoint.checkpoint
-                x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(block), x, t, mask, rope, use_reentrant=False)
-            else:
-                x = block(x, t, mask=mask, rope=rope)
-
-        if self.long_skip_connection is not None:
-            x = self.long_skip_connection(torch.cat((x, residual), dim=-1))
+            x = block(x, t, mask=mask, rope=rope)
 
         x = self.norm_out(x, t)
         output = self.proj_out(x)

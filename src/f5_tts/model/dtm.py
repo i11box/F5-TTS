@@ -329,7 +329,7 @@ class DTM(nn.Module):
             trajectory: Trajectory of generation (for visualization)
         """
         self.eval()
-        
+        self.head = self.backbone.proj_out
         # Handle raw wave conditioning
         if cond.ndim == 2:
             cond = self.mel_spec(cond)
@@ -405,11 +405,8 @@ class DTM(nn.Module):
                 mask=mask,
                 cfg_infer=True
             )
-            h_cond, h_uncond = torch.chunk(h_t_cfg, 2, dim=0)
-            
-            # 2. Head 分别预测
-            v_cond = self.head(h_cond)
-            v_uncond = self.head(h_uncond)
+            h_t_cfg = self.head(h_t_cfg)
+            v_cond, v_uncond = torch.chunk(h_t_cfg, 2, dim=0)
             
             # 3. CFG 公式: v = uncond + cfg * (cond - uncond)
             v_final = v_cond + cfg_strength * (v_cond - v_uncond)

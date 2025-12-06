@@ -14,6 +14,9 @@ import torch.nn.functional as F
 from torch import nn
 
 from f5_tts.model.modules import TimestepEmbedding, AdaLayerNorm, FeedForward
+from f5_tts.model.dtm_heads.base_head import BaseDTMHead
+from f5_tts.model.dtm_heads.matcha_head import MatchaDTMHead
+from f5_tts.model.dtm_heads.mlp_head import MLPDTMHead
 
 
 class DTMHeadBlock(nn.Module):
@@ -58,7 +61,7 @@ class DTMHeadBlock(nn.Module):
         return x + ff_out
 
 
-class DTMHead(nn.Module):
+class DTMHeadOrig(nn.Module):
     """
     DTM MLP Head for predicting velocity field (displacement vectors).
     
@@ -173,3 +176,33 @@ class DTMHead(nn.Module):
         
         return v
 
+class DTMHead(nn.Module):
+    
+    def __init__(
+        self,
+        backbone_dim: int = 1024,
+        mel_dim: int = 100,
+        hidden_dim: int = 1024,
+        name: str = None
+    ):
+        super().__init__()
+        
+        self.backbone_dim = backbone_dim
+        self.mel_dim = mel_dim
+        self.hidden_dim = hidden_dim
+        
+        if name == 'mlp':
+            self.net = MLPDTMHead()
+        elif name == 'matcha':
+            self.net = MatchaDTMHead()
+        else:
+            raise ValueError(f'Unseen Flow Head {name}')
+    
+    def forward(
+        self,
+        h_t: torch.Tensor,  # Backbone features [N, backbone_dim] where N=batch*seq_len
+        y_s: torch.Tensor,  # Flow state [N, mel_dim] where N=batch*seq_len
+        s: torch.Tensor,  # Microscopic time [N] where N=batch*seq_len, or scalar
+    ) -> torch.Tensor:
+        
+        return self.net(h_t, y_s, s)

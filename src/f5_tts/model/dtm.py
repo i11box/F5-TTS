@@ -110,6 +110,10 @@ class DTM(nn.Module):
         # Vocab map for tokenization
         self.vocab_char_map = vocab_char_map
         print(f'my ode {ode_solver_steps}')
+        
+        with torch.no_grad():
+            self.head.output_proj.weight.copy_(self.backbone.proj_out.weight)
+            self.head.output_proj.bias.copy_(self.backbone.proj_out.bias)
     
     @property
     def device(self):
@@ -285,11 +289,11 @@ class DTM(nn.Module):
         Y = X_T - X_0
         
         # Forward through trainable head (now accepts flattened input)
-        # v_pred = self.head(h_t)
-        v_pred = self.backbone.proj_out(h_t)
-        dummy_loss = 0.0 * sum(p.sum() for p in self.head.parameters())
+        v_pred = self.head(h_t)
+        # v_pred = self.backbone.proj_out(h_t)
+        # dummy_loss = 0.0 * sum(p.sum() for p in self.head.parameters())
         # Compute MSE loss with mask (like CFM, only on masked region)
-        loss = F.mse_loss(v_pred, Y, reduction='none') + dummy_loss  # [batch*seq_len, mel_dim]
+        loss = F.mse_loss(v_pred, Y, reduction='none')# [batch*seq_len, mel_dim]
         
         # Apply rand_span_mask to only compute loss on the region to be predicted
         loss = loss[rand_span_mask]
@@ -407,6 +411,7 @@ class DTM(nn.Module):
                 cfg_infer=True
             )
             h_t_cfg = self.head(h_t_cfg)
+            # h_t_cfg = self.backbone.proj_out(h_t_cfg)
             v_cond, v_uncond = torch.chunk(h_t_cfg, 2, dim=0)
             
             # 3. CFG 公式: v = uncond + cfg * (cond - uncond)

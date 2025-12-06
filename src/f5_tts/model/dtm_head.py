@@ -117,8 +117,8 @@ class DTMHead(nn.Module):
         self.output_proj = nn.Linear(backbone_dim, mel_dim)
         
         # Initialize output projection to zero (for stability)
-        nn.init.constant_(self.output_proj.weight, 0)
-        nn.init.constant_(self.output_proj.bias, 0)
+        # nn.init.constant_(self.output_proj.weight, 0)
+        # nn.init.constant_(self.output_proj.bias, 0)
     
     def forward(
         self,

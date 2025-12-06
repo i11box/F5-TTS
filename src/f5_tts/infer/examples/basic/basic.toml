@@ -7,7 +7,7 @@ ref_text = "对，这就是我，万人敬仰的太乙真人。"
 # ref_audio = "infer/examples/basic/basic_ref_en.wav"
 # If an empty "", transcribes the reference audio automatically.
 # ref_text = "Some call me nature, others call me mother nature."
-gen_text = "我再也不想debug了"
+gen_text = "今天天气很好，适合出去走走兜兜风"
 # File with text to generate. Ignores the text above.
 gen_file = ""
 remove_silence = false

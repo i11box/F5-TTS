@@ -202,12 +202,9 @@ class DiT(nn.Module):
                 for _ in range(depth)
             ]
         )
-        self.long_skip_connection = nn.Linear(dim * 2, dim, bias=False) if long_skip_connection else None
 
         self.norm_out = AdaLayerNorm_Final(dim)  # final modulation
         self.proj_out = nn.Linear(dim, mel_dim)
-
-        self.checkpoint_activations = checkpoint_activations
 
         self.initialize_weights()
 
@@ -222,14 +219,6 @@ class DiT(nn.Module):
         nn.init.constant_(self.norm_out.linear.bias, 0)
         nn.init.constant_(self.proj_out.weight, 0)
         nn.init.constant_(self.proj_out.bias, 0)
-
-    def ckpt_wrapper(self, module):
-        # https://github.com/chuanyangjin/fast-DiT/blob/main/models.py
-        def ckpt_forward(*inputs):
-            outputs = module(*inputs)
-            return outputs
-
-        return ckpt_forward
 
     def get_input_embed(
         self,
@@ -256,17 +245,6 @@ class DiT(nn.Module):
                     )
                     text_embed_list.append(text_embed_i[0])
                 text_embed = pad_sequence(text_embed_list, batch_first=True, padding_value=0)
-            if cache:
-                if drop_text:
-                    self.text_uncond = text_embed
-                else:
-                    self.text_cond = text_embed
-
-        if cache:
-            if drop_text:
-                text_embed = self.text_uncond
-            else:
-                text_embed = self.text_cond
 
         x = self.input_embed(x, cond, text_embed, drop_audio_cond=drop_audio_cond, audio_mask=audio_mask)
 

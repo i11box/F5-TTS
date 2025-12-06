@@ -50,8 +50,12 @@ class Block1D(torch.nn.Module):
 class ResnetBlock1D(torch.nn.Module):
     def __init__(self, dim, dim_out, time_emb_dim, groups=8):
         super().__init__()
-        # 修正：Time MLP 必须投影到 dim_out
-        self.time_mlp = torch.nn.Sequential(torch.nn.Linear(dim, time_emb_dim), nn.Mish(), torch.nn.Linear(time_emb_dim, dim_out))
+        # 修正：Time MLP 接收独立的 time_emb_dim，投影到 dim_out
+        self.time_mlp = torch.nn.Sequential(
+            torch.nn.Linear(time_emb_dim, time_emb_dim), 
+            nn.Mish(), 
+            torch.nn.Linear(time_emb_dim, dim_out)
+        )
 
         self.block1 = Block1D(dim, dim_out, groups=groups)
         self.block2 = Block1D(dim_out, dim_out, groups=groups)
@@ -59,11 +63,12 @@ class ResnetBlock1D(torch.nn.Module):
 
     def forward(self, x, time_emb):
         # x: [B, C, T]
+        # time_emb: [B, time_emb_dim]
         h = self.block1(x)
         
-        # Time Injection: [B, C_out] -> [B, C_out, 1]
-        time_emb = self.time_mlp(time_emb).unsqueeze(-1)
-        h = h + time_emb
+        # Time Injection: [B, time_emb_dim] -> [B, dim_out] -> [B, dim_out, 1]
+        time_emb_proj = self.time_mlp(time_emb).unsqueeze(-1)
+        h = h + time_emb_proj
         
         h = self.block2(h)
         return h + self.res_conv(x)
@@ -84,8 +89,15 @@ class Upsample1D(nn.Module):
 
 class MLPBlock(nn.Module):
     """MLP block with AdaLayerNorm before MLP"""
-    def __init__(self, dim):
+    def __init__(self, dim, time_emb_dim=None):
         super().__init__()
+        # If time_emb_dim is different from dim, add a projection layer
+        self.time_emb_dim = time_emb_dim if time_emb_dim is not None else dim
+        if self.time_emb_dim != dim:
+            self.time_proj = nn.Linear(self.time_emb_dim, dim)
+        else:
+            self.time_proj = nn.Identity()
+        
         self.norm = AdaLayerNorm(dim)
         self.ff = nn.Sequential(
             nn.Linear(dim, dim * 2),
@@ -102,8 +114,11 @@ class MLPBlock(nn.Module):
         Returns:
             Output tensor [batch, seq_len, dim]
         """
+        # Project time_emb to match dim
+        time_emb_proj = self.time_proj(time_emb)  # [batch, dim]
+        
         # AdaLN modulation
-        x_norm, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm(x, time_emb)
+        x_norm, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm(x, time_emb_proj)
         
         # Apply MLP to normalized input
         ff_out = self.ff(x_norm)
@@ -125,14 +140,17 @@ class Matcha(nn.Module):
         dropout=0.05,
         n_blocks=1,
         num_mid_blocks=2,
+        time_emb_dim=None,  # 新增：接收外部指定的 time embedding 维度
     ):
         super().__init__()
         channels = tuple(channels)
         self.in_channels = in_channels
         self.out_channels = out_channels
 
-        # Time Embedding
-        time_embed_dim = channels[0] * 4
+        # Time Embedding 维度：优先使用传入的，否则使用默认值
+        if time_emb_dim is None:
+            time_emb_dim = channels[0] * 4
+        self.time_emb_dim = time_emb_dim
 
         self.down_blocks = nn.ModuleList([])
         self.mid_blocks = nn.ModuleList([])
@@ -145,7 +163,7 @@ class Matcha(nn.Module):
             output_channel = channels[i]
             is_last = i == len(channels) - 1
             
-            resnet = ResnetBlock1D(input_channel, output_channel, time_emb_dim=time_embed_dim)
+            resnet = ResnetBlock1D(input_channel, output_channel, time_emb_dim=self.time_emb_dim)
             
             # MLP Blocks
             mlp_blocks = nn.ModuleList([self.get_block(output_channel) for _ in range(n_blocks)])
@@ -156,7 +174,7 @@ class Matcha(nn.Module):
         # --- Mid ---
         mid_channel = channels[-1]
         for i in range(num_mid_blocks):
-            resnet = ResnetBlock1D(mid_channel, mid_channel, time_emb_dim=time_embed_dim)
+            resnet = ResnetBlock1D(mid_channel, mid_channel, time_emb_dim=self.time_emb_dim)
             mlp_blocks = nn.ModuleList([self.get_block(mid_channel) for _ in range(n_blocks)])
             self.mid_blocks.append(nn.ModuleList([resnet, mlp_blocks]))
 
@@ -172,17 +190,13 @@ class Matcha(nn.Module):
             input_channel = current_channel
             output_channel = up_channels[i] # Target output
             
-            # Skip connection adds channels
-            # We assume skip connection has same channels as output_channel of corresponding down block
-            # Actually, U-Net symmetric: skip comes from down block i.
-            # Down path: in -> 256 (skip) -> 256 (skip)
-            # Up path:   256 + 256(skip) -> 256 ...
+            # Skip connection comes from corresponding down block (in reverse order)
+            # down_blocks are in order: channels[0], channels[1], ..., channels[-1]
+            # up_blocks pop from hiddens in reverse: channels[-1], channels[-2], ..., channels[0]
+            # So up_blocks[i] gets skip from down_blocks[-(i+1)]
+            skip_channel = channels[-(i+1)]
             
-            # Simplified logic: The skip connection channel count is usually equal to input_channel
-            # if symmetric.
-            skip_channel = input_channel # Assuming symmetric
-            
-            resnet = ResnetBlock1D(input_channel + skip_channel, output_channel, time_emb_dim=time_embed_dim)
+            resnet = ResnetBlock1D(input_channel + skip_channel, output_channel, time_emb_dim=self.time_emb_dim)
             
             mlp_blocks = nn.ModuleList([self.get_block(output_channel) for _ in range(n_blocks)])
             
@@ -192,13 +206,14 @@ class Matcha(nn.Module):
             self.up_blocks.append(nn.ModuleList([resnet, mlp_blocks, upsample]))
             current_channel = output_channel
 
-        self.final_block = Block1D(channels[0], channels[0])
+        # Final block: project from channels[0] to out_channels
+        self.final_block = Block1D(channels[0], out_channels)
         self.initialize_weights()
 
     @staticmethod
-    def get_block(dim):
+    def get_block(self, dim):
         """Returns a simple MLP block (Linear -> SnakeBeta -> Linear)"""
-        return MLPBlock(dim)
+        return MLPBlock(dim, time_emb_dim=self.time_emb_dim)
 
     def initialize_weights(self):
         for m in self.modules():
@@ -210,11 +225,23 @@ class Matcha(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, x, t):
-
-        # 2. Input Prep (Concat x and mu if needed, here assuming mu is part of input or ignored)
-        # x: [B, C, T]
-        if x.dim() == 3 and x.shape[-1] == self.in_channels:
-            x = x.transpose(1, 2) # [B, T, C] -> [B, C, T]
+        """
+        Args:
+            x: Input tensor [B, C, T] where C=in_channels
+            t: Time embedding [B, time_emb_dim]
+        
+        Returns:
+            Output tensor [B, C_out, T] where C_out=out_channels (after final_block)
+        """
+        # Ensure x is in [B, C, T] format
+        # Check if x is in [B, T, C] format by comparing channel dimension
+        if x.dim() == 3 and x.shape[1] != self.in_channels and x.shape[-1] == self.in_channels:
+            x = x.transpose(1, 2)  # [B, T, C] -> [B, C, T]
+        
+        # Validate input shape
+        assert x.shape[1] == self.in_channels, \
+            f"Expected input channels {self.in_channels}, got {x.shape[1]}"
+        
         hiddens = []
         
         # --- Down ---
@@ -290,31 +317,41 @@ class MatchaDTMHead(BaseDTMHead):
             channels=(hidden_dim, hidden_dim * 2), # 简单配置两层，可根据 num_layers 调整
             dropout=dropout,
             n_blocks=1,
-            num_mid_blocks=2
+            num_mid_blocks=2,
+            time_emb_dim=hidden_dim  # 传入 time embedding 维度，与 BaseDTMHead.time_embed 输出一致
         )
 
     def forward_net(
         self,
-        x: torch.Tensor,  # [B, Seq_Len, Backbone_Dim]
-        time_emb: torch.Tensor,  # [B, Seq_Len, Mel_Dim]
+        x: torch.Tensor,  # [B, T, hidden_dim]
+        time_emb: torch.Tensor,  # [B, hidden_dim]
     ) -> torch.Tensor:
         """
         Drop-in replacement forward pass.
+        
+        Args:
+            x: Input tensor [B, T, hidden_dim]
+            time_emb: Time embedding [B, hidden_dim]
+        
+        Returns:
+            Output tensor [B, T, hidden_dim]
         """
-        # Permute to [B, C, T] for Conv1D
-        # 1. 维度检查与重塑 (适配 Conv1D)
-        # 假设输入是 [B, L, D]
+        # 1. 维度检查
         if x.dim() == 2: 
-            # 如果输入被 Flatten 成了 [N, D]，无法用卷积，必须报错或由外部保证输入是 3D
-            # F5-TTS 的 DTM 实现中，通常可以通过 view 变回 [B, L, D]
-            # 这里假设输入已经是 Unflattened 的 [B, L, D]
-            raise ValueError("MatchaHead requires 3D input [B, L, D], but got 2D.")
-
-        x = x.transpose(1, 2)
+            # 如果输入是 2D [N, D]，需要转换为 3D
+            # 但我们无法知道 B 和 T，所以报错
+            raise ValueError("MatchaDTMHead requires 3D input [B, T, D], but got 2D. "
+                           "This should be handled by BaseDTMHead.")
         
-        # 5. U-Net Forward
-        # 注意：你的 Matcha.forward 签名是 (x, t)，这很好
-        out = self.unet(x, time_emb)
+        # 2. Transpose to [B, hidden_dim, T] for Conv1D
+        x = x.transpose(1, 2)  # [B, T, hidden_dim] -> [B, hidden_dim, T]
         
-        # 6. 转置回 [B, L, Mel_Dim] 以匹配 DTM 接口
-        return out.transpose(1, 2)
+        # 3. U-Net Forward
+        # x: [B, hidden_dim, T]
+        # time_emb: [B, hidden_dim]
+        out = self.unet(x, time_emb)  # -> [B, hidden_dim, T]
+        
+        # 4. Transpose back to [B, T, hidden_dim]
+        out = out.transpose(1, 2)  # [B, hidden_dim, T] -> [B, T, hidden_dim]
+        
+        return out

@@ -49,31 +49,60 @@ class BaseDTMHead(nn.Module):
 
     def forward(
         self,
-        h_t: torch.Tensor,  # [N, backbone_dim] (N=batch*seq_len)
-        y_s: torch.Tensor,  # [N, mel_dim]
-        s: torch.Tensor,    # [N] or scalar
+        h_t: torch.Tensor,  # [B, T, backbone_dim] or [N, backbone_dim] (N=batch*seq_len)
+        y_s: torch.Tensor,  # [B, T, mel_dim] or [N, mel_dim]
+        s: torch.Tensor,    # [B] or [N] or scalar
     ) -> torch.Tensor:
         """
         Standardized forward pass.
+        Supports both 3D [B, T, D] and 2D [N, D] inputs.
         """
-        b = h_t.shape[0]
+        # Detect input format
+        is_3d = h_t.ndim == 3
         
-        # 1. Handle scalar time s -> [N]
-        if s.ndim == 0:
-            s = s.repeat(b)
-        
-        # 2. Time Embedding -> [N, hidden_dim]
-        time_emb = self.time_embed(s)
-        
-        # 3. Input Concatenation & Projection
-        x = torch.cat([h_t, y_s], dim=-1) # [N, backbone + mel]
-        x = self.input_proj(x)            # [N, hidden_dim]
-        
-        # 4. Core Network Forward (Subclass implementation)
-        x = self.forward_net(x, time_emb)
-        
-        # 5. Output Projection
-        v = self.output_proj(x)           # [N, mel_dim]
+        if is_3d:
+            # 3D input: [B, T, D]
+            b, t = h_t.shape[0], h_t.shape[1]
+            
+            # 1. Handle scalar or batch-level time s -> [B]
+            if s.ndim == 0:
+                s = s.repeat(b)
+            elif s.shape[0] == b * t:
+                # If s is already [B*T], take one per batch
+                s = s.view(b, t)[:, 0]  # Use first timestep's s for each batch
+            
+            # 2. Time Embedding -> [B, hidden_dim]
+            time_emb = self.time_embed(s)
+            
+            # 3. Input Concatenation & Projection
+            x = torch.cat([h_t, y_s], dim=-1)  # [B, T, backbone + mel]
+            x = self.input_proj(x)             # [B, T, hidden_dim]
+            
+            # 4. Core Network Forward (Subclass implementation)
+            x = self.forward_net(x, time_emb)  # [B, T, hidden_dim]
+            
+            # 5. Output Projection
+            v = self.output_proj(x)            # [B, T, mel_dim]
+        else:
+            # 2D input: [N, D] (original behavior for backward compatibility)
+            N = h_t.shape[0]
+            
+            # 1. Handle scalar time s -> [N]
+            if s.ndim == 0:
+                s = s.repeat(N)
+            
+            # 2. Time Embedding -> [N, hidden_dim]
+            time_emb = self.time_embed(s)
+            
+            # 3. Input Concatenation & Projection
+            x = torch.cat([h_t, y_s], dim=-1)  # [N, backbone + mel]
+            x = self.input_proj(x)             # [N, hidden_dim]
+            
+            # 4. Core Network Forward (Subclass implementation)
+            x = self.forward_net(x, time_emb)
+            
+            # 5. Output Projection
+            v = self.output_proj(x)            # [N, mel_dim]
         
         return v
 

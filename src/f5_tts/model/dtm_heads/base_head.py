@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 from abc import abstractmethod
 
+from f5_tts.model.modules import TimestepEmbedding
+
 class BaseDTMHead(nn.Module):
     """
     Base class for DTM Heads.
@@ -13,9 +15,9 @@ class BaseDTMHead(nn.Module):
     """
     def __init__(
         self,
-        backbone_dim: int = 1024,
-        mel_dim: int = 100,
-        hidden_dim: int = 1024,
+        backbone_dim: int,
+        mel_dim: int,
+        hidden_dim: int,
     ):
         super().__init__()
         self.backbone_dim = backbone_dim

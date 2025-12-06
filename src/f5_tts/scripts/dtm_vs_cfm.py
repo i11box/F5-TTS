@@ -9,8 +9,8 @@ from torchdiffeq import odeint
 def test_dtm_vs_cfm():
     print("Initializing Models...")
     # Setup small models for testing
-    dim = 64
-    mel_dim = 32
+    dim = 1024
+    mel_dim = 100
     # IMPORTANT: Enable long_skip_connection to test the potential bug
     dit = DiT(
         dim=dim, 
@@ -30,7 +30,7 @@ def test_dtm_vs_cfm():
     # DTM wraps the SAME DiT instance (frozen in DTM usually, but here we share it)
     dtm = DTM(
         backbone=dit,
-        mel_spec_kwargs={"n_mel_channels": mel_dim}
+        mel_spec_kwargs={"n_mel_channels": mel_dim},
     )
     
     # Set to eval to disable dropout for deterministic comparison
@@ -76,7 +76,7 @@ def test_dtm_vs_cfm():
         
         # 3. Manually project DTM features using DiT's output projection
         # If extract_backbone_features is correct, this should match out_dit
-        out_dtm_projected = dtm.head(h_dtm)
+        out_dtm_projected = dtm.head(h_dtm, x, time)
         
         # Compare
         diff = (out_dit - out_dtm_projected).abs().max()

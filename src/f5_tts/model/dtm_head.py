@@ -192,9 +192,9 @@ class DTMHead(nn.Module):
         self.hidden_dim = hidden_dim
         
         if name == 'mlp':
-            self.net = MLPDTMHead()
+            self.net = MLPDTMHead(backbone_dim=backbone_dim, mel_dim=mel_dim, hidden_dim = hidden_dim)
         elif name == 'matcha':
-            self.net = MatchaDTMHead()
+            self.net = MatchaDTMHead(backbone_dim = backbone_dim, mel_dim = mel_dim, hidden_dim = hidden_dim)
         else:
             raise ValueError(f'Unseen Flow Head {name}')
     

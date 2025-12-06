@@ -87,6 +87,8 @@ class DTM(nn.Module):
             head = DTMHead(
                 backbone_dim=backbone.dim,
                 mel_dim=mel_spec_kwargs.get('n_mel_channels', 100),
+                hidden_dim=256,
+                name = 'matcha'
             )
         self.head = head
         
@@ -111,9 +113,9 @@ class DTM(nn.Module):
         self.vocab_char_map = vocab_char_map
         print(f'my ode {ode_solver_steps}')
         
-        with torch.no_grad():
-            self.head.output_proj.weight.copy_(self.backbone.proj_out.weight)
-            self.head.output_proj.bias.copy_(self.backbone.proj_out.bias)
+        # with torch.no_grad():
+        #     self.head.output_proj.weight.copy_(self.backbone.proj_out.weight)
+        #     self.head.output_proj.bias.copy_(self.backbone.proj_out.bias)
     
     @property
     def device(self):

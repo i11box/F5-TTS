@@ -210,7 +210,7 @@ class Matcha(nn.Module):
         self.final_block = Block1D(channels[0], out_channels)
         self.initialize_weights()
 
-    @staticmethod
+    # @staticmethod
     def get_block(self, dim):
         """Returns a simple MLP block (Linear -> SnakeBeta -> Linear)"""
         return MLPBlock(dim, time_emb_dim=self.time_emb_dim)

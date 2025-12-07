@@ -4,7 +4,7 @@ hydra:
 
 datasets:
   name: WenetSpeech4TTS_Premium  # dataset name
-  batch_size_per_gpu: 64000  # 8 GPUs, 8 * 38400 = 307200
+  batch_size_per_gpu: 24000  # 8 GPUs, 8 * 38400 = 307200
   batch_size_type: frame  # frame | sample
   max_samples: 64  # max sequences per batch if use frame-wise batch_size. we set 32 for small models, 64 for base models
   num_workers: 4
@@ -18,11 +18,11 @@ optim:
   bnb_optimizer: False  # use bnb 8bit AdamW optimizer or not
 
 model:
-  name: DTM_F5TTS_Base  # model name
+  name: DTM_F5TTS_DiT  # model name
   tokenizer: pinyin  # tokenizer type
   tokenizer_path: null  # if 'custom' tokenizer, define the path want to use (should be vocab.txt)
   backbone: DiT
-  train_together: False
+  train_together: True
   
   # Backbone architecture (frozen, pretrained)
   backbone_arch:

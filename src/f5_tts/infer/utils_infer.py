@@ -325,9 +325,8 @@ def load_dtm_model(
     head = DTMHead(
         backbone_dim=backbone_cfg.get("dim", 1024),
         mel_dim=n_mel_channels,
-        hidden_dim=512,
-        num_layers=6,
-        ff_mult=4,
+        hidden_dim=256,
+        name='matcha'
     )
     
     # Create DTM model

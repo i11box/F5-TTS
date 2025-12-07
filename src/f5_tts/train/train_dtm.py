@@ -137,6 +137,7 @@ def main(model_cfg):
     dtm_config = model_cfg.model.dtm
     tokenizer = model_cfg.model.tokenizer
     mel_spec_type = model_cfg.model.mel_spec.mel_spec_type
+    train_together = model_cfg.model.train_together
     
     exp_name = f"{model_cfg.model.name}_{mel_spec_type}_{tokenizer}_{model_cfg.datasets.name}"
     wandb_resume_id = None
@@ -203,8 +204,7 @@ def main(model_cfg):
         "ode_solver_steps": dtm_config.ode_solver_steps,
         "ode_solver_method": dtm_config.ode_solver_method,
         "head_hidden_dim": head_arch.hidden_dim,
-        "head_num_layers": head_arch.num_layers,
-        "head_ff_mult": head_arch.ff_mult,
+        "head_name": head_arch.name,
         "epochs": model_cfg.optim.epochs,
         "learning_rate": model_cfg.optim.learning_rate,
         "num_warmup_updates": model_cfg.optim.num_warmup_updates,
@@ -243,6 +243,15 @@ def main(model_cfg):
         local_vocoder_path=model_cfg.model.vocoder.local_path,
         model_cfg_dict=model_cfg_dict,
     )
+    
+    # 在 Trainer 初始化后重建优化器（支持分组学习率）
+    if train_together:
+        trainer.optimizer = trainer.accelerator.prepare(
+            torch.optim.AdamW([
+                {'params': model.head.parameters(), 'lr': model_cfg.optim.learning_rate},  # head 用配置的 lr
+                {'params': model.backbone.parameters(), 'lr': 5e-6}  # backbone 极低 lr（解冻后生效）
+            ], weight_decay=0.01)
+        )
     
     # Load dataset
     train_dataset = load_dataset(

@@ -126,7 +126,7 @@ def test_dtm_vs_cfm():
     # let's use DiT's proj_out as the "Head" for this test.
     
     h_dtm_train = dtm.extract_backbone_features(x=phi, cond=cond, text=text, time=t, mask=mask)
-    pred_dtm = dtm.head(h_dtm_train) # Using DiT proj as surrogate for DTM head
+    pred_dtm = dtm.head(h_dtm_train, x1, t) # Using DiT proj as surrogate for DTM head
     
     loss_dtm = F.mse_loss(pred_dtm, target_flow, reduction='none')
     loss_dtm = loss_dtm[mask].mean()
@@ -196,7 +196,7 @@ def test_dtm_vs_cfm():
             drop_audio_cond=False,
             drop_text=False
         )
-        v_final = dtm.head(h_t_cfg)
+        v_final = dtm.head(h_t_cfg, x, t_batch)
         
         return v_final
             
